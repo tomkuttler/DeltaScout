@@ -40,6 +40,9 @@ class DeltaScoutError(Exception):
 class UrlEntry:
     name: str
     url: str
+    render_js: bool = False
+    wait_selector: str | None = None
+    wait_timeout_seconds: int = 20
 
 
 @dataclass(frozen=True)
@@ -108,7 +111,10 @@ def main() -> int:
         for entry in urls:
             checked += 1
             try:
-                html = fetch_html(entry.url, timeout_seconds, user_agent)
+                if entry.render_js:
+                    html = fetch_html_rendered(entry, user_agent)
+                else:
+                    html = fetch_html(entry.url, timeout_seconds, user_agent)
                 normalized_text = normalize_html(html)
             except Exception as exc:  # noqa: BLE001
                 failed += 1
@@ -335,13 +341,45 @@ def load_urls(path: Path) -> list[UrlEntry]:
             raise DeltaScoutError(f"{path.name} entry #{idx} must be a mapping")
         url = str(item.get("url", "")).strip()
         name = str(item.get("name", "")).strip() or url
+        render_js = parse_bool_field(item.get("render_js", False), "render_js", idx, path.name)
+
+        wait_selector_raw = item.get("wait_selector")
+        if wait_selector_raw is None:
+            wait_selector: str | None = None
+        elif isinstance(wait_selector_raw, str):
+            wait_selector = wait_selector_raw.strip() or None
+        else:
+            raise DeltaScoutError(
+                f"{path.name} entry #{idx} has invalid 'wait_selector' (must be string)"
+            )
+
+        wait_timeout_seconds = parse_int_field(
+            item.get("wait_timeout_seconds", 20),
+            "wait_timeout_seconds",
+            idx,
+            path.name,
+            min_value=1,
+        )
+
         if not url:
             raise DeltaScoutError(f"{path.name} entry #{idx} is missing 'url'")
         validate_url(url, idx, path.name)
         if url in seen_urls:
             raise DeltaScoutError(f"{path.name} contains duplicate URL: {url}")
+        if not render_js and wait_selector is not None:
+            raise DeltaScoutError(
+                f"{path.name} entry #{idx} sets wait_selector but render_js is false"
+            )
         seen_urls.add(url)
-        entries.append(UrlEntry(name=name, url=url))
+        entries.append(
+            UrlEntry(
+                name=name,
+                url=url,
+                render_js=render_js,
+                wait_selector=wait_selector,
+                wait_timeout_seconds=wait_timeout_seconds,
+            )
+        )
 
     if not entries:
         raise DeltaScoutError(f"{path.name} has no URLs to monitor")
@@ -405,6 +443,51 @@ def fetch_html(url: str, timeout_seconds: int, user_agent: str) -> str:
         raise DeltaScoutError(f"network error for {url}: {exc.reason}") from exc
 
 
+def fetch_html_rendered(entry: UrlEntry, user_agent: str) -> str:
+    try:
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise DeltaScoutError(
+            "render_js=true requires Playwright. Install dependencies with "
+            "'python -m pip install -r requirements.txt' and browser binaries with "
+            "'python -m playwright install chromium'."
+        ) from exc
+
+    timeout_ms = entry.wait_timeout_seconds * 1000
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            context = browser.new_context(user_agent=user_agent)
+            page = context.new_page()
+            try:
+                page.goto(entry.url, wait_until="domcontentloaded", timeout=timeout_ms)
+                if entry.wait_selector:
+                    page.wait_for_selector(entry.wait_selector, timeout=timeout_ms)
+                else:
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=timeout_ms)
+                    except PlaywrightTimeoutError:
+                        # Some sites keep long-lived connections; continue with current DOM.
+                        pass
+                return page.content()
+            finally:
+                context.close()
+                browser.close()
+    except PlaywrightTimeoutError as exc:
+        if entry.wait_selector:
+            waiting_for = f"selector '{entry.wait_selector}'"
+        else:
+            waiting_for = "page load"
+        raise DeltaScoutError(
+            f"Playwright timeout waiting for {waiting_for} on {entry.url}"
+        ) from exc
+    except DeltaScoutError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise DeltaScoutError(f"Playwright error for {entry.url}: {short_error(exc)}") from exc
+
+
 def normalize_html(html: str) -> str:
     parser = VisibleTextExtractor()
     parser.feed(html)
@@ -464,6 +547,39 @@ def parse_recipients(raw: str) -> list[str]:
     if not recipients:
         raise DeltaScoutError("ALERT_EMAIL_TO must include at least one recipient")
     return recipients
+
+
+def parse_bool_field(
+    value: Any, field_name: str, idx: int, filename: str
+) -> bool:
+    if isinstance(value, bool):
+        return value
+    raise DeltaScoutError(
+        f"{filename} entry #{idx} has invalid '{field_name}' (must be true/false)"
+    )
+
+
+def parse_int_field(
+    value: Any,
+    field_name: str,
+    idx: int,
+    filename: str,
+    *,
+    min_value: int,
+) -> int:
+    if isinstance(value, bool):
+        raise DeltaScoutError(
+            f"{filename} entry #{idx} has invalid '{field_name}' (must be integer)"
+        )
+    if not isinstance(value, int):
+        raise DeltaScoutError(
+            f"{filename} entry #{idx} has invalid '{field_name}' (must be integer)"
+        )
+    if value < min_value:
+        raise DeltaScoutError(
+            f"{filename} entry #{idx} has invalid '{field_name}' (must be >= {min_value})"
+        )
+    return value
 
 
 def build_email_subject(changed: int, failed: int, started_at: datetime) -> str:

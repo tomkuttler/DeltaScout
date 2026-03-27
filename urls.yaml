@@ -1,2 +1,3 @@
 - name: Example
   url: https://example.com/
+  render_js: false
