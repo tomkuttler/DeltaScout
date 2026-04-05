@@ -8,6 +8,7 @@ It compares normalized visible text (not raw HTML) and sends one digest email wi
 
 - Monitors a list of URLs from `urls.yaml`
 - Supports JavaScript-rendered pages using Playwright (`render_js: true`)
+- Supports per-site ignored line prefixes to suppress noisy volatile content
 - Saves timestamped snapshots in `.deltascout/snapshots/`
 - Tracks baselines in `.deltascout/state.json`
 - Writes per-run metadata in `.deltascout/runs/`
@@ -62,12 +63,17 @@ cp .env.example .env
 - name: Example
   url: https://example.com/
   render_js: false
+  ignore_line_prefixes:
+    - "Security question:"
 
 - name: Job Board
   url: https://jobs.example.com/
   render_js: true
   wait_selector: ".job-list-item"
   wait_timeout_seconds: 30
+  ignore_line_prefixes:
+    - "Last updated:"
+    - "Session token:"
 ```
 
 `urls.yaml` fields:
@@ -77,6 +83,7 @@ cp .env.example .env
 - `render_js` (optional, default `false`): enable headless Chromium rendering
 - `wait_selector` (optional): CSS selector to wait for before snapshotting (only valid with `render_js: true`)
 - `wait_timeout_seconds` (optional, default `20`): timeout for page load/selector wait in JS mode
+- `ignore_line_prefixes` (optional): list of prefixes; lines starting with any prefix are removed before snapshot/diff
 
 ## Run Manually
 

@@ -43,6 +43,7 @@ class UrlEntry:
     render_js: bool = False
     wait_selector: str | None = None
     wait_timeout_seconds: int = 20
+    ignore_line_prefixes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -116,6 +117,9 @@ def main() -> int:
                 else:
                     html = fetch_html(entry.url, timeout_seconds, user_agent)
                 normalized_text = normalize_html(html)
+                normalized_text = apply_line_prefix_ignores(
+                    normalized_text, entry.ignore_line_prefixes
+                )
             except Exception as exc:  # noqa: BLE001
                 failed += 1
                 fetch_errors.append(
@@ -360,6 +364,12 @@ def load_urls(path: Path) -> list[UrlEntry]:
             path.name,
             min_value=1,
         )
+        ignore_line_prefixes = parse_string_list_field(
+            item.get("ignore_line_prefixes", []),
+            "ignore_line_prefixes",
+            idx,
+            path.name,
+        )
 
         if not url:
             raise DeltaScoutError(f"{path.name} entry #{idx} is missing 'url'")
@@ -378,6 +388,7 @@ def load_urls(path: Path) -> list[UrlEntry]:
                 render_js=render_js,
                 wait_selector=wait_selector,
                 wait_timeout_seconds=wait_timeout_seconds,
+                ignore_line_prefixes=ignore_line_prefixes,
             )
         )
 
@@ -499,6 +510,18 @@ def normalize_html(html: str) -> str:
     return (fallback + "\n") if fallback else ""
 
 
+def apply_line_prefix_ignores(text: str, prefixes: tuple[str, ...]) -> str:
+    if not prefixes:
+        return text
+
+    kept_lines = [
+        line for line in text.splitlines() if not any(line.startswith(p) for p in prefixes)
+    ]
+    if not kept_lines:
+        return ""
+    return "\n".join(kept_lines).strip() + "\n"
+
+
 def save_snapshot(entry: UrlEntry, run_id: str, content: str) -> str:
     slug = make_entry_slug(entry)
     destination_dir = SNAPSHOTS_DIR / slug
@@ -580,6 +603,34 @@ def parse_int_field(
             f"{filename} entry #{idx} has invalid '{field_name}' (must be >= {min_value})"
         )
     return value
+
+
+def parse_string_list_field(
+    value: Any,
+    field_name: str,
+    idx: int,
+    filename: str,
+) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        candidate = value.strip()
+        return (candidate,) if candidate else ()
+    if not isinstance(value, list):
+        raise DeltaScoutError(
+            f"{filename} entry #{idx} has invalid '{field_name}' (must be list of strings)"
+        )
+
+    result: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise DeltaScoutError(
+                f"{filename} entry #{idx} has invalid '{field_name}' (must be list of strings)"
+            )
+        candidate = item.strip()
+        if candidate:
+            result.append(candidate)
+    return tuple(result)
 
 
 def build_email_subject(changed: int, failed: int, started_at: datetime) -> str:
